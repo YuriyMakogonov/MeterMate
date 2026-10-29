@@ -29,6 +29,7 @@ function defaults() {
     dues: [],
     tariffs: [],
     templates: {}, // meterId -> { '0': [base64, ...], ..., '9': [...] }
+    templatesVersion: 2, // формат образцов; при смене алгоритма старые сбрасываются
     sync: { at: '' }, // когда данные последний раз совпадали с таблицей
     google: { url: '', token: '', auto: true, hash: '', pending: false, error: '', at: '' },
   };
@@ -40,6 +41,10 @@ function load() {
     if (raw) {
       const data = JSON.parse(raw);
       const base = defaults();
+      if (data.templatesVersion !== base.templatesVersion) {
+        data.templates = {};
+        data.templatesVersion = base.templatesVersion;
+      }
       return { ...base, ...data, settings: { ...base.settings, ...data.settings }, google: { ...base.google, ...data.google } };
     }
   } catch (e) {
@@ -203,7 +208,8 @@ export function merge(data) {
     state[key] = merged;
     total += changed;
   }
-  for (const [meterId, digits] of Object.entries(data.templates || {})) {
+  const templates = data.templatesVersion === state.templatesVersion ? data.templates : {};
+  for (const [meterId, digits] of Object.entries(templates || {})) {
     const own = (state.templates[meterId] ||= {});
     for (const [digit, items] of Object.entries(digits)) {
       own[digit] = [...new Set([...(own[digit] || []), ...items])].slice(-MAX_SAMPLES);
