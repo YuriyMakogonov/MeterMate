@@ -7,6 +7,7 @@ const ASSETS = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
   'js/app.js', 'js/store.js', 'js/dom.js', 'js/camera.js', 'js/cropper.js',
   'js/recognizer.js', 'js/stats.js', 'js/xlsx.js', 'js/export.js',
+  'js/ledger.js', 'js/sheets.js', 'js/legacy.js', 'js/google.js',
   'icons/icon.svg', 'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png',
 ];
 
