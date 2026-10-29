@@ -1,9 +1,12 @@
 // Хранилище данных: всё лежит локально на устройстве (localStorage).
 // Записи не удаляются физически, а помечаются deleted — так слияние
-// резервных копий с разных устройств корректно переносит удаления.
+// резервных копий и таблиц с разных устройств корректно переносит удаления.
 
 const KEY = 'metermate.v1';
 const MAX_SAMPLES = 6; // сколько образцов каждой цифры хранить на счётчик
+
+// Коллекции записей, привязанных к счётчику (у тарифа meterId может быть пустым = все)
+export const KINDS = ['readings', 'payments', 'adjustments', 'dues', 'tariffs'];
 
 export const uid = () =>
   globalThis.crypto?.randomUUID?.() ?? Date.now().toString(36) + Math.random().toString(36).slice(2);
@@ -13,7 +16,7 @@ const now = () => new Date().toISOString();
 function defaults() {
   return {
     version: 1,
-    settings: { currency: '', updatedAt: '' },
+    settings: { currency: 'BYN', commission: 2, updatedAt: '' },
     // Постоянные id и пустой updatedAt: на всех устройствах это «одни и те же»
     // счётчики, и при импорте любое переименование побеждает умолчание.
     meters: [
@@ -21,15 +24,24 @@ function defaults() {
       { id: 'm2', name: 'Счётчик 2', drums: 6, decimals: 1, updatedAt: '' },
     ],
     readings: [],
+    payments: [],
+    adjustments: [],
+    dues: [],
     tariffs: [],
     templates: {}, // meterId -> { '0': [base64, ...], ..., '9': [...] }
+    sync: { at: '' }, // когда данные последний раз совпадали с таблицей
+    google: { url: '', token: '', auto: true, hash: '', pending: false, error: '', at: '' },
   };
 }
 
 function load() {
   try {
     const raw = localStorage.getItem(KEY);
-    if (raw) return { ...defaults(), ...JSON.parse(raw) };
+    if (raw) {
+      const data = JSON.parse(raw);
+      const base = defaults();
+      return { ...base, ...data, settings: { ...base.settings, ...data.settings }, google: { ...base.google, ...data.google } };
+    }
   } catch (e) {
     console.warn('Не удалось прочитать данные', e);
   }
@@ -39,15 +51,18 @@ function load() {
 let state = load();
 const listeners = new Set();
 
-function save() {
+function save({ silent = false } = {}) {
   localStorage.setItem(KEY, JSON.stringify(state));
-  listeners.forEach((fn) => fn());
+  if (!silent) listeners.forEach((fn) => fn());
 }
 
+/** Подписка на изменения данных (не вызывается для служебных полей синхронизации). */
 export const onChange = (fn) => listeners.add(fn);
 
 const alive = (x) => !x.deleted;
-const byDate = (a, b) => a.date.localeCompare(b.date) || a.createdAt.localeCompare(b.createdAt);
+const dateOf = (x) => x.date || x.from || '';
+export const byDate = (a, b) =>
+  dateOf(a).localeCompare(dateOf(b)) || (a.createdAt || '').localeCompare(b.createdAt || '');
 
 // --- Счётчики ---
 
@@ -68,40 +83,56 @@ export function updateMeter(id, patch) {
 
 export const removeMeter = (id) => updateMeter(id, { deleted: true });
 
-// --- Показания ---
+// --- Записи: показания, оплаты, сверки, взносы, тарифы ---
 
-export const readings = (meterId) =>
-  state.readings.filter((r) => alive(r) && r.meterId === meterId).sort(byDate);
+export const list = (kind, meterId) =>
+  state[kind].filter((x) => alive(x) && (meterId == null || x.meterId === meterId)).sort(byDate);
 
-export const allReadings = () => state.readings.filter(alive).sort(byDate);
+export const get = (kind, id) => state[kind].find((x) => x.id === id);
 
-export function addReading({ meterId, date, value, source }) {
-  const r = { id: uid(), meterId, date, value, source, createdAt: now(), updatedAt: now() };
-  state.readings.push(r);
+export function add(kind, fields) {
+  const rec = { id: uid(), ...fields, createdAt: now(), updatedAt: now() };
+  state[kind].push(rec);
   save();
-  return r;
+  return rec;
 }
 
-export function removeReading(id) {
-  Object.assign(state.readings.find((r) => r.id === id), { deleted: true, updatedAt: now() });
-  save();
-}
-
-// --- Тарифы ---
-
-export const tariffs = () => state.tariffs.filter(alive).sort((a, b) => a.from.localeCompare(b.from));
-
-export function addTariff({ from, price, meterId }) {
-  state.tariffs.push({ id: uid(), from, price, meterId: meterId || '', updatedAt: now() });
+export function update(kind, id, patch) {
+  Object.assign(get(kind, id), patch, { updatedAt: now() });
   save();
 }
 
-export function removeTariff(id) {
-  Object.assign(state.tariffs.find((t) => t.id === id), { deleted: true, updatedAt: now() });
+export const remove = (kind, id) => update(kind, id, { deleted: true });
+
+// Совместимость с экранами показаний и тарифов
+export const readings = (meterId) => list('readings', meterId);
+export const allReadings = () => list('readings');
+export const addReading = (fields) => add('readings', fields);
+export const removeReading = (id) => remove('readings', id);
+export const tariffs = () => list('tariffs');
+export const addTariff = ({ from, price, meterId }) => add('tariffs', { from, price, meterId: meterId || '' });
+export const removeTariff = (id) => remove('tariffs', id);
+
+/**
+ * Применить набор изменений из таблицы одной операцией.
+ * ops: [{ kind, id, fields, op: 'add' | 'update' | 'remove' }]
+ */
+export function applyOps(ops) {
+  const stamp = now();
+  for (const { kind, id, fields, op } of ops) {
+    const existing = get(kind, id);
+    if (op === 'remove') {
+      if (existing) Object.assign(existing, { deleted: true, updatedAt: stamp });
+    } else if (existing) {
+      Object.assign(existing, fields, { deleted: false, updatedAt: stamp });
+    } else {
+      state[kind].push({ id, ...fields, createdAt: fields.createdAt || stamp, updatedAt: stamp });
+    }
+  }
   save();
 }
 
-// --- Настройки ---
+// --- Настройки и служебное ---
 
 export const settings = () => state.settings;
 
@@ -110,29 +141,46 @@ export function setSetting(key, value) {
   save();
 }
 
+export const syncInfo = () => state.sync;
+
+export function markSynced(at = now()) {
+  state.sync = { at };
+  save({ silent: true });
+}
+
+export const google = () => state.google;
+
+export function setGoogle(patch) {
+  state.google = { ...state.google, ...patch };
+  save({ silent: true });
+}
+
 // --- Образцы цифр для распознавания ---
 
 export const templates = (meterId) => state.templates[meterId] || {};
 
 export const templateCount = (meterId) =>
-  Object.values(templates(meterId)).reduce((n, list) => n + list.length, 0);
+  Object.values(templates(meterId)).reduce((n, items) => n + items.length, 0);
 
 export function addTemplates(meterId, samples) {
   const own = (state.templates[meterId] ||= {});
-  for (const [digit, list] of Object.entries(samples)) {
-    own[digit] = [...(own[digit] || []), ...list].slice(-MAX_SAMPLES);
+  for (const [digit, items] of Object.entries(samples)) {
+    own[digit] = [...(own[digit] || []), ...items].slice(-MAX_SAMPLES);
   }
-  save();
+  save({ silent: true });
 }
 
 export function resetTemplates(meterId) {
   delete state.templates[meterId];
-  save();
+  save({ silent: true });
 }
 
 // --- Резервная копия и слияние ---
 
-export const snapshot = () => JSON.parse(JSON.stringify(state));
+export function snapshot() {
+  const { google: _, ...rest } = state; // адрес и ключ Google в копию не попадают
+  return JSON.parse(JSON.stringify(rest));
+}
 
 function mergeList(local, incoming = []) {
   const byId = new Map(local.map((x) => [x.id, x]));
@@ -150,18 +198,20 @@ function mergeList(local, incoming = []) {
 export function merge(data) {
   if (!data || data.version !== 1) throw new Error('Это не файл резервной копии MeterMate');
   let total = 0;
-  for (const key of ['meters', 'readings', 'tariffs']) {
-    const [list, changed] = mergeList(state[key], data[key]);
-    state[key] = list;
+  for (const key of ['meters', ...KINDS]) {
+    const [merged, changed] = mergeList(state[key], data[key]);
+    state[key] = merged;
     total += changed;
   }
   for (const [meterId, digits] of Object.entries(data.templates || {})) {
     const own = (state.templates[meterId] ||= {});
-    for (const [digit, list] of Object.entries(digits)) {
-      own[digit] = [...new Set([...(own[digit] || []), ...list])].slice(-MAX_SAMPLES);
+    for (const [digit, items] of Object.entries(digits)) {
+      own[digit] = [...new Set([...(own[digit] || []), ...items])].slice(-MAX_SAMPLES);
     }
   }
-  if ((data.settings?.updatedAt || '') > (state.settings.updatedAt || '')) state.settings = data.settings;
+  if ((data.settings?.updatedAt || '') > (state.settings.updatedAt || '')) {
+    state.settings = { ...state.settings, ...data.settings };
+  }
   save();
   return total;
 }
