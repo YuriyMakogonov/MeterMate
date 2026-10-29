@@ -56,17 +56,48 @@ function toast(msg) {
   toastTimer = setTimeout(() => ($toast.hidden = true), 3500);
 }
 
-function showOverlay(node) {
+// --- Системная кнопка «Назад» (жест на Android, свайп на iPhone) ---
+// Пока открыт полноэкранный экран, в истории браузера лежит одна запись
+// { overlay }. «Назад» снимает её, и вместо выхода из приложения вызывается
+// обработчик экрана: закрыть его или вернуться на предыдущий шаг.
+// На вкладках, кроме главной, «Назад» возвращает на главную.
+
+let overlayBack = null;
+let ignorePop = 0;
+
+function showOverlay(node, onBack = closeOverlay) {
   $overlay.replaceChildren(node);
   $overlay.hidden = false;
   document.body.classList.add('locked');
+  overlayBack = onBack;
+  if (!history.state?.overlay) history.pushState({ overlay: true, tab: history.state?.tab }, '');
 }
 
 function closeOverlay() {
   $overlay.hidden = true;
   $overlay.replaceChildren();
   document.body.classList.remove('locked');
+  overlayBack = null;
+  if (history.state?.overlay) {
+    ignorePop++;
+    history.back();
+  }
 }
+
+window.addEventListener('popstate', () => {
+  if (ignorePop) {
+    ignorePop--;
+    return;
+  }
+  if (!$overlay.hidden && overlayBack) {
+    overlayBack();
+    return;
+  }
+  if (tab !== 'home') {
+    tab = 'home';
+    render();
+  }
+});
 
 async function deliver(blob, filename) {
   const file = new File([blob], filename, { type: blob.type });
@@ -403,10 +434,12 @@ async function startCamera() {
     toast('Камера недоступна в этом браузере — выберите фото');
     return;
   }
-  showOverlay(h('div', { class: 'screen camera' }, h('div', { class: 'cam-hint' }, 'Запуск камеры…')));
+  // «Назад» на экране камеры останавливает камеру
+  const stop = new AbortController();
+  showOverlay(h('div', { class: 'screen camera' }, h('div', { class: 'cam-hint' }, 'Запуск камеры…')), () => stop.abort());
   try {
     const shot = await openCamera($overlay, {
-      drums: m.drums, decimals: m.decimals, aspect: aspectOf(m), title: m.name,
+      drums: m.drums, decimals: m.decimals, aspect: aspectOf(m), title: m.name, signal: stop.signal,
     });
     if (shot) openCrop(shot.canvas, shot.rect);
     else closeOverlay();
@@ -442,6 +475,23 @@ async function fromFile(file) {
 
 // --- Подгонка рамки ---
 
+/** Поле «− N +»: возвращает { el, set }. */
+function stepper(label, value, min, max, onChange) {
+  const out = h('b', { class: 'stepper-value' }, value);
+  let current = value;
+  const btn = (text, delta) => h('button', {
+    class: 'round-btn', 'aria-label': `${label}: ${delta > 0 ? 'больше' : 'меньше'}`,
+    onclick: () => {
+      const next = Math.min(max, Math.max(min, current + delta));
+      if (next !== current) onChange(next);
+    },
+  }, text);
+  return {
+    el: h('div', { class: 'stepper' }, h('span', { class: 'small muted' }, label), btn('−', -1), out, btn('+', 1)),
+    set: (v) => { current = v; out.textContent = v; },
+  };
+}
+
 function openCrop(src, rect) {
   const m = store.meter(meterId);
   const cropper = new Cropper(src, { drums: m.drums, decimals: m.decimals, aspect: aspectOf(m), rect });
@@ -456,6 +506,15 @@ function openCrop(src, rect) {
       frame = requestAnimationFrame(() => cropper.setAngle(v));
     },
   });
+  // Число барабанов меняется прямо здесь и запоминается для счётчика
+  const setDrums = (drums, decimals) => {
+    store.updateMeter(m.id, { drums, decimals });
+    cropper.setDrums(drums, decimals);
+    drumsCtl.set(drums);
+    decCtl.set(decimals);
+  };
+  const drumsCtl = stepper('Барабанов', m.drums, 3, 8, (v) => setDrums(v, Math.min(m.decimals, v - 1)));
+  const decCtl = stepper('после запятой', m.decimals, 0, 2, (v) => setDrums(m.drums, Math.min(v, m.drums - 1)));
   const screen = h('div', { class: 'screen crop' },
     h('header', { class: 'bar' },
       h('button', { class: 'link', onclick: closeOverlay }, 'Отмена'),
@@ -465,6 +524,7 @@ function openCrop(src, rect) {
       ? 'Подправьте рамку: углы — размер, внутри — сдвиг, два пальца — масштаб.'
       : 'Нажмите на барабаны на фото — рамка переедет туда. Потом подгоните углы.'),
     h('div', { class: 'crop-stage' }, cropper.canvas),
+    h('div', { class: 'steppers' }, drumsCtl.el, decCtl.el),
     h('label', { class: 'rot' }, 'Наклон', slider, angleLabel),
     h('footer', { class: 'bar' },
       h('button', {
@@ -568,10 +628,11 @@ function openConfirm({ strip, back }) {
     h('div', { class: 'confirm-body' },
       strip && h('div', { class: 'strip' }, strip),
       cells || h('label', { class: 'field' }, 'Показание, кВт·ч', manualInput),
-      results && h('p', { class: 'muted small' }, 'Нажмите на цифру, чтобы исправить. Подтверждённые цифры запоминаются, и распознавание этого счётчика становится точнее.'),
+      results && h('p', { class: 'muted small' }, 'Нажмите на цифру, чтобы исправить. Подтверждённые цифры запоминаются, и распознавание этого счётчика становится точнее. Если ячеек больше или меньше, чем барабанов, вернитесь к рамке и поменяйте их число.'),
       h('label', { class: 'field' }, 'Дата показания', dateInput),
       summary),
-    h('footer', { class: 'bar' }, h('button', { class: 'primary wide', onclick: save }, 'Сохранить'))));
+    h('footer', { class: 'bar' }, h('button', { class: 'primary wide', onclick: save }, 'Сохранить'))),
+  back || closeOverlay);
   update();
   if (!results) manualInput.focus();
 }
@@ -1043,6 +1104,12 @@ function render() {
 
 document.querySelectorAll('#tabs button').forEach((b) => b.addEventListener('click', () => {
   tab = b.dataset.tab;
+  // Запись в истории, чтобы «Назад» вернул на главную, а не закрыл приложение
+  if (tab !== 'home' && !history.state?.tab) history.pushState({ tab: true }, '');
+  if (tab === 'home' && history.state?.tab) {
+    ignorePop++;
+    history.back();
+  }
   render();
   window.scrollTo(0, 0);
 }));

@@ -8,11 +8,15 @@ export function frameCells(drums, decimals) {
     h('div', { class: i >= drums - decimals ? 'cell dec' : 'cell' }));
 }
 
-export async function openCamera(container, { drums, decimals, aspect, title }) {
+export async function openCamera(container, { drums, decimals, aspect, title, signal }) {
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: false,
     video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
   });
+  if (signal?.aborted) {
+    stream.getTracks().forEach((t) => t.stop());
+    return null;
+  }
   const track = stream.getVideoTracks()[0];
   const caps = track.getCapabilities?.() || {};
 
@@ -28,6 +32,7 @@ export async function openCamera(container, { drums, decimals, aspect, title }) 
       stream.getTracks().forEach((t) => t.stop());
       resolve(result);
     };
+    signal?.addEventListener('abort', () => finish(null));
 
     const shoot = () => {
       const vw = video.videoWidth, vh = video.videoHeight;
