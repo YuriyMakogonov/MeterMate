@@ -21,6 +21,12 @@ export class Cropper {
     }
   }
 
+  setDrums(drums, decimals) {
+    this.drums = drums;
+    this.decimals = decimals;
+    this.draw();
+  }
+
   defaultRect(aspect) {
     const w = this.src.width * 0.4, h = w / aspect;
     return { x: (this.src.width - w) / 2, y: (this.src.height - h) / 2, w, h };

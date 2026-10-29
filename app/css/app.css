@@ -342,3 +342,9 @@ input[type=url], input[type=password] {
   padding: 10px 12px;
   min-height: 44px;
 }
+
+/* Число барабанов на экране рамки */
+.steppers { display: flex; justify-content: space-between; gap: 12px; padding: 10px 16px 0; flex-wrap: wrap; }
+.stepper { display: flex; align-items: center; gap: 8px; }
+.stepper-value { min-width: 18px; text-align: center; font-size: 18px; font-variant-numeric: tabular-nums; }
+.round-btn { width: 36px; height: 36px; padding: 0; border-radius: 50%; font-size: 20px; line-height: 1; }
